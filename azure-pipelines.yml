@@ -4,7 +4,8 @@ trigger:
       - main
 
 pool:
-  name: 'Default'  # Self-hosted agent
+  name: Default  # <-- IMPORTANT: Your self-hosted agent name
+  # Don't use `vmImage: 'ubuntu-latest'` since you are using your own agent.
 
 steps:
 - task: NodeTool@0
@@ -12,15 +13,14 @@ steps:
     versionSpec: '22.x'
   displayName: 'Install Node.js'
 
-- script: |
-    npm install
-    npm run build || exit 1
-  displayName: 'Install dependencies and build'
-  continueOnError: false
+- script: npm install
+  displayName: 'Install dependencies'
+
+- script: npm run build
+  displayName: 'Build Next.js app'
 
 - task: PublishBuildArtifacts@1
-  condition: succeeded()
   inputs:
-    PathtoPublish: '$(Build.SourcesDirectory)/.next'
+    pathToPublish: '.next'
     artifactName: 'nextjs-app'
     publishLocation: 'Container'
