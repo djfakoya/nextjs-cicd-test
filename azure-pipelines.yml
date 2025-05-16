@@ -4,23 +4,45 @@ trigger:
       - main
 
 pool:
-  name: Default  # <-- IMPORTANT: Your self-hosted agent name
-  # Don't use `vmImage: 'ubuntu-latest'` since you are using your own agent.
+  name: Default  # <-- Your self-hosted agent name
 
 steps:
+# Install Node.js
 - task: NodeTool@0
   inputs:
     versionSpec: '22.x'
   displayName: 'Install Node.js'
 
-- script: npm install
+# Install dependencies
+- script: |
+    npm install
+    # Clean npm cache after install to save space
+    npm cache clean --force
   displayName: 'Install dependencies'
 
-- script: npm run build
-  displayName: 'Build Next.js app'
+# Build the Next.js app
+- script: |
+    npm run build
+    # Remove any unused files to free up space after build
+    rm -rf node_modules/.cache
+    rm -rf .next/cache
+  displayName: 'Build Next.js app and clean up'
 
+# Publish build artifacts (keeping only necessary files)
 - task: PublishBuildArtifacts@1
   inputs:
-    pathToPublish: '.next'
+    pathToPublish: '.next'  # Only publish the .next folder if you're using SSR or static export
     artifactName: 'nextjs-app'
     publishLocation: 'Container'
+
+# Clean up exhausted space after the build
+- script: |
+    echo "Cleaning up temporary files..."
+    # Remove any unnecessary files to free up space (add any directories or files not needed)
+    rm -rf $(Build.SourcesDirectory)/node_modules
+    rm -rf $(Build.ArtifactStagingDirectory)/*
+  displayName: 'Clean up exhausted space'
+
+# Optionally, if you are using Docker, you can clean up Docker images
+# - script: docker system prune -f
+#   displayName: 'Clean up Docker images'
