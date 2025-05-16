@@ -46,43 +46,23 @@ steps:
     artifactName: 'nextjs-app'
     publishLocation: 'Container'
 
-# ✅ CD - Deployment Step (PowerShell)
-- task: PowerShell@2
-  displayName: 'Deploy to IIS'
+# ✅ Download build artifacts before deployment
+- task: DownloadBuildArtifacts@0
   inputs:
-    targetType: 'inline'
-    script: |
-      $ErrorActionPreference = "Stop"
+    artifactName: 'nextjs-app'
+    downloadPath: '$(Build.SourcesDirectory)\artifact'
 
-      Write-Host "Creating deployment folder if it doesn't exist..."
-      $deployPath = "$(deployPath)"
-      if (!(Test-Path $deployPath)) {
-        New-Item -ItemType Directory -Force -Path $deployPath
-      }
-
-      Write-Host "Extracting build artifacts..."
-      $artifactPath = "$(Pipeline.Workspace)\nextjs-app"
-      Copy-Item -Path "$artifactPath\*" -Destination $deployPath -Recurse -Force
-
-      Import-Module WebAdministration
-
-      Write-Host "Creating application pool if not exists..."
-      if (!(Get-WebAppPoolState -Name "$(appPoolName)" -ErrorAction SilentlyContinue)) {
-        New-WebAppPool -Name "$(appPoolName)"
-      }
-
-      Write-Host "Creating or updating site under Optimus Apps..."
-      $siteExists = Get-Website | Where-Object { $_.Name -eq "$(siteName)" }
-      if (!$siteExists) {
-        New-Website -Name "$(siteName)" -PhysicalPath $deployPath -Port $env:portHttp -ApplicationPool "$(appPoolName)"
-        Set-ItemProperty "IIS:\Sites\$(siteName)" -Name bindings -Value @(
-          @{protocol="http"; bindingInformation="*:$(portHttp):"}
-          @{protocol="https"; bindingInformation="*:$(portHttps):"}
-        )
-      } else {
-        Set-ItemProperty "IIS:\Sites\$(siteName)" -Name physicalPath -Value $deployPath
-        Restart-WebAppPool -Name "$(appPoolName)"
-        Restart-WebSite -Name "$(siteName)"
-      }
-
-      Write-Host "Deployment complete."
+# ✅ CD - Deploy using external PowerShell script
+- task: PowerShell@2
+  displayName: 'Deploy to IIS via Script'
+  inputs:
+    targetType: 'filePath'
+    filePath: '$(Build.SourcesDirectory)\scripts\deploy-to-iis.ps1'
+    arguments: >
+      -BuildArtifactPath "$(Build.SourcesDirectory)\artifact\nextjs-app"
+      -DeployPath "$(deployPath)"
+      -AppPoolName "$(appPoolName)"
+      -SiteName "$(siteName)"
+      -PortHttp $(portHttp)
+      -PortHttps $(portHttps)
+    pwsh: false
