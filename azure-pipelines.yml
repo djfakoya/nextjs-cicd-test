@@ -14,6 +14,8 @@ variables:
   appPoolName: 'AppPool_$(appName)'
   portHttp: 8026
   portHttps: 8025
+  artifactFolder: '$(Build.ArtifactStagingDirectory)\nextjs-app'
+  zipPath: '$(Build.ArtifactStagingDirectory)\nextjs-app.zip'
 
 steps:
 # Install Node.js
@@ -39,20 +41,40 @@ steps:
     if exist .next\cache rmdir /s /q .next\cache
   displayName: 'Build Next.js app and clean up'
 
-# Publish build artifacts
+# Zip the .next folder (Windows zip)
+- script: |
+    echo Zipping build artifacts...
+    powershell Compress-Archive -Path .next\* -DestinationPath "$(zipPath)" -Force
+  displayName: 'Zip build artifacts'
+
+# Verify artifact contents
+- script: |
+    echo Listing zipped artifact contents...
+    powershell -Command "Expand-Archive -Path '$(zipPath)' -DestinationPath '$(Build.ArtifactStagingDirectory)\unzipped' -Force"
+    dir "$(Build.ArtifactStagingDirectory)\unzipped" /s
+  displayName: 'Verify artifact contents'
+
+# Publish zipped artifact
 - task: PublishBuildArtifacts@1
   inputs:
-    pathToPublish: '.next'
+    pathToPublish: '$(zipPath)'
     artifactName: 'nextjs-app'
     publishLocation: 'Container'
+  displayName: 'Publish zipped artifact'
 
-# ✅ Download build artifacts before deployment
+# Download build artifacts before deployment
 - task: DownloadBuildArtifacts@0
   inputs:
     artifactName: 'nextjs-app'
     downloadPath: '$(Build.SourcesDirectory)\artifact'
 
-# ✅ CD - Deploy using external PowerShell script
+# Unzip downloaded artifact before deployment
+- script: |
+    echo Extracting zipped artifact...
+    powershell -Command "Expand-Archive -Path '$(Build.SourcesDirectory)\artifact\nextjs-app.zip' -DestinationPath '$(Build.SourcesDirectory)\artifact\nextjs-app' -Force"
+  displayName: 'Unzip downloaded artifact'
+
+# CD - Deploy using PowerShell script
 - task: PowerShell@2
   displayName: 'Deploy to IIS via Script'
   inputs:
