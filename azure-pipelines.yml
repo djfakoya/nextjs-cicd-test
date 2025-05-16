@@ -4,7 +4,16 @@ trigger:
       - main
 
 pool:
-  name: Default  # <-- Your self-hosted agent name
+  name: Default  # Self-hosted agent
+
+variables:
+  appName: 'MyNextJsApp'
+  parentSite: 'Optimus Apps'
+  deployPath: 'C:\\inetpub\\wwwroot\\Optimus Apps\\$(appName)'
+  siteName: 'Optimus_$(appName)'
+  appPoolName: 'AppPool_$(appName)'
+  portHttp: 8026
+  portHttps: 8025
 
 steps:
 # Install Node.js
@@ -21,30 +30,59 @@ steps:
     npm cache clean --force
   displayName: 'Install dependencies'
 
-# Build the Next.js app and clean up
+# Build the Next.js app
 - script: |
     echo Building the Next.js app...
     npm run build
-    echo Cleaning up .cache folders...
+    echo Cleaning up cache...
     if exist node_modules\.cache rmdir /s /q node_modules\.cache
     if exist .next\cache rmdir /s /q .next\cache
   displayName: 'Build Next.js app and clean up'
 
-# Publish build artifacts (keeping only necessary files)
+# Publish build artifacts
 - task: PublishBuildArtifacts@1
   inputs:
-    pathToPublish: '.next'  # Only publish the .next folder if you're using SSR or static export
+    pathToPublish: '.next'
     artifactName: 'nextjs-app'
     publishLocation: 'Container'
 
-# Clean up exhausted space after the build
-- script: |
-    echo Cleaning up temporary files...
-    REM Remove node_modules and artifact staging directory
-    if exist "$(Build.SourcesDirectory)\node_modules" rmdir /s /q "$(Build.SourcesDirectory)\node_modules"
-    if exist "$(Build.ArtifactStagingDirectory)" rmdir /s /q "$(Build.ArtifactStagingDirectory)"
-  displayName: 'Clean up exhausted space'
+# ✅ CD - Deployment Step (PowerShell)
+- task: PowerShell@2
+  displayName: 'Deploy to IIS'
+  inputs:
+    targetType: 'inline'
+    script: |
+      $ErrorActionPreference = "Stop"
 
-# Optional: Docker cleanup (uncomment if needed and Docker is installed)
-# - script: docker system prune -f
-#   displayName: 'Clean up Docker images'
+      Write-Host "Creating deployment folder if it doesn't exist..."
+      $deployPath = "$(deployPath)"
+      if (!(Test-Path $deployPath)) {
+        New-Item -ItemType Directory -Force -Path $deployPath
+      }
+
+      Write-Host "Extracting build artifacts..."
+      $artifactPath = "$(Pipeline.Workspace)\nextjs-app"
+      Copy-Item -Path "$artifactPath\*" -Destination $deployPath -Recurse -Force
+
+      Import-Module WebAdministration
+
+      Write-Host "Creating application pool if not exists..."
+      if (!(Get-WebAppPoolState -Name "$(appPoolName)" -ErrorAction SilentlyContinue)) {
+        New-WebAppPool -Name "$(appPoolName)"
+      }
+
+      Write-Host "Creating or updating site under Optimus Apps..."
+      $siteExists = Get-Website | Where-Object { $_.Name -eq "$(siteName)" }
+      if (!$siteExists) {
+        New-Website -Name "$(siteName)" -PhysicalPath $deployPath -Port $env:portHttp -ApplicationPool "$(appPoolName)"
+        Set-ItemProperty "IIS:\Sites\$(siteName)" -Name bindings -Value @(
+          @{protocol="http"; bindingInformation="*:$(portHttp):"}
+          @{protocol="https"; bindingInformation="*:$(portHttps):"}
+        )
+      } else {
+        Set-ItemProperty "IIS:\Sites\$(siteName)" -Name physicalPath -Value $deployPath
+        Restart-WebAppPool -Name "$(appPoolName)"
+        Restart-WebSite -Name "$(siteName)"
+      }
+
+      Write-Host "Deployment complete."
