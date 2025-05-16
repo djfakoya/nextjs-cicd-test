@@ -9,12 +9,12 @@ pool:
 variables:
   appName: 'MyNextJsApp'
   parentSite: 'Optimus Apps'
-  deployPath: 'C:\\inetpub\\wwwroot\\Optimus Apps\\$(appName)'
+  unzipPath: 'C:\\Cicd-frontend'
+  deployPath: 'C:\\Cicd-frontend\\$(appName)'
   siteName: 'Optimus_$(appName)'
   appPoolName: 'AppPool_$(appName)'
   portHttp: 8026
   portHttps: 8025
-  artifactFolder: '$(Build.ArtifactStagingDirectory)\nextjs-app'
   zipPath: '$(Build.ArtifactStagingDirectory)\nextjs-app.zip'
 
 steps:
@@ -41,18 +41,11 @@ steps:
     if exist .next\cache rmdir /s /q .next\cache
   displayName: 'Build Next.js app and clean up'
 
-# Zip the .next folder (Windows zip)
+# Zip the .next folder
 - script: |
     echo Zipping build artifacts...
     powershell Compress-Archive -Path .next\* -DestinationPath "$(zipPath)" -Force
   displayName: 'Zip build artifacts'
-
-# Verify artifact contents
-- script: |
-    echo Listing zipped artifact contents...
-    powershell -Command "Expand-Archive -Path '$(zipPath)' -DestinationPath '$(Build.ArtifactStagingDirectory)\unzipped' -Force"
-    dir "$(Build.ArtifactStagingDirectory)\unzipped" /s
-  displayName: 'Verify artifact contents'
 
 # Publish zipped artifact
 - task: PublishBuildArtifacts@1
@@ -62,26 +55,21 @@ steps:
     publishLocation: 'Container'
   displayName: 'Publish zipped artifact'
 
-# Download build artifacts before deployment
+# Download build artifact
 - task: DownloadBuildArtifacts@0
   inputs:
     artifactName: 'nextjs-app'
     downloadPath: '$(Build.SourcesDirectory)\artifact'
 
-# Unzip downloaded artifact before deployment
-- script: |
-    echo Extracting zipped artifact...
-    powershell -Command "Expand-Archive -Path '$(Build.SourcesDirectory)\artifact\nextjs-app.zip' -DestinationPath '$(Build.SourcesDirectory)\artifact\nextjs-app' -Force"
-  displayName: 'Unzip downloaded artifact'
-
-# CD - Deploy using PowerShell script
+# CD - Deploy to IIS via external script
 - task: PowerShell@2
   displayName: 'Deploy to IIS via Script'
   inputs:
     targetType: 'filePath'
     filePath: '$(Build.SourcesDirectory)\scripts\deploy-to-iis.ps1'
     arguments: >
-      -BuildArtifactPath "$(Build.SourcesDirectory)\artifact\nextjs-app"
+      -ZipFilePath "$(Build.SourcesDirectory)\artifact\nextjs-app.zip"
+      -UnzipPath "$(unzipPath)"
       -DeployPath "$(deployPath)"
       -AppPoolName "$(appPoolName)"
       -SiteName "$(siteName)"
