@@ -15,17 +15,19 @@ steps:
 
 # Install dependencies
 - script: |
+    echo Installing dependencies...
     npm install
-    # Clean npm cache after install to save space
+    echo Cleaning npm cache...
     npm cache clean --force
   displayName: 'Install dependencies'
 
-# Build the Next.js app
+# Build the Next.js app and clean up
 - script: |
+    echo Building the Next.js app...
     npm run build
-    # Remove any unused files to free up space after build
-    rm -rf node_modules/.cache
-    rm -rf .next/cache
+    echo Cleaning up .cache folders...
+    if exist node_modules\.cache rmdir /s /q node_modules\.cache
+    if exist .next\cache rmdir /s /q .next\cache
   displayName: 'Build Next.js app and clean up'
 
 # Publish build artifacts (keeping only necessary files)
@@ -37,12 +39,12 @@ steps:
 
 # Clean up exhausted space after the build
 - script: |
-    echo "Cleaning up temporary files..."
-    # Remove any unnecessary files to free up space (add any directories or files not needed)
-    rm -rf $(Build.SourcesDirectory)/node_modules
-    rm -rf $(Build.ArtifactStagingDirectory)/*
+    echo Cleaning up temporary files...
+    REM Remove node_modules and artifact staging directory
+    if exist "$(Build.SourcesDirectory)\node_modules" rmdir /s /q "$(Build.SourcesDirectory)\node_modules"
+    if exist "$(Build.ArtifactStagingDirectory)" rmdir /s /q "$(Build.ArtifactStagingDirectory)"
   displayName: 'Clean up exhausted space'
 
-# Optionally, if you are using Docker, you can clean up Docker images
+# Optional: Docker cleanup (uncomment if needed and Docker is installed)
 # - script: docker system prune -f
 #   displayName: 'Clean up Docker images'
