@@ -1,5 +1,6 @@
 param (
-  [string]$BuildArtifactZipPath,
+  [string]$ZipFilePath,
+  [string]$UnzipPath,
   [string]$DeployPath,
   [string]$AppPoolName,
   [string]$SiteName,
@@ -9,47 +10,57 @@ param (
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "📦 Zipped artifact: $BuildArtifactZipPath"
-Write-Host "🚀 Deploying to: $DeployPath"
+Write-Host "==== PARAMETERS RECEIVED ===="
+Write-Host "ZipFilePath: $ZipFilePath"
+Write-Host "UnzipPath: $UnzipPath"
+Write-Host "DeployPath: $DeployPath"
+Write-Host "AppPoolName: $AppPoolName"
+Write-Host "SiteName: $SiteName"
+Write-Host "PortHttp: $PortHttp"
+Write-Host "PortHttps: $PortHttps"
+Write-Host "============================="
 
-# Create deployment directory if it doesn't exist
-if (!(Test-Path $DeployPath)) {
-    Write-Host "Creating deployment folder at $DeployPath..."
-    New-Item -ItemType Directory -Force -Path $DeployPath
-}
+try {
+  if (-not (Test-Path $ZipFilePath)) {
+    throw "ZIP file not found at path: $ZipFilePath"
+  }
 
-# Clear previous deployment (optional: comment if you want to keep old files)
-Write-Host "Cleaning up existing contents in deploy path..."
-Remove-Item "$DeployPath\*" -Recurse -Force -ErrorAction SilentlyContinue
+  if (Test-Path $DeployPath) {
+    Write-Host "Removing existing deploy path: $DeployPath"
+    Remove-Item -Recurse -Force $DeployPath
+  }
 
-# Unzip the build artifact into the deployment directory
-Write-Host "Unzipping artifact to deploy path..."
-Expand-Archive -Path $BuildArtifactZipPath -DestinationPath $DeployPath -Force
+  Write-Host "Creating deploy path: $DeployPath"
+  New-Item -ItemType Directory -Force -Path $DeployPath | Out-Null
 
-# Load WebAdministration module to interact with IIS
-Import-Module WebAdministration
+  Write-Host "Extracting ZIP file to deploy path..."
+  Expand-Archive -Path $ZipFilePath -DestinationPath $DeployPath -Force
 
-# Create application pool if it doesn't exist
-if (-not (Get-WebAppPoolState -Name $AppPoolName -ErrorAction SilentlyContinue)) {
-    Write-Host "Creating application pool: $AppPoolName"
+  Import-Module WebAdministration
+
+  if (-not (Get-WebAppPoolState -Name $AppPoolName -ErrorAction SilentlyContinue)) {
+    Write-Host "Creating App Pool: $AppPoolName"
     New-WebAppPool -Name $AppPoolName
-}
+  }
 
-# Check if IIS site exists
-$site = Get-Website | Where-Object { $_.Name -eq $SiteName }
-
-if (-not $site) {
-    Write-Host "Creating new IIS website: $SiteName"
+  $site = Get-Website | Where-Object { $_.Name -eq $SiteName }
+  if (-not $site) {
+    Write-Host "Creating new IIS site: $SiteName"
     New-Website -Name $SiteName -PhysicalPath $DeployPath -Port $PortHttp -ApplicationPool $AppPoolName
-
-    Write-Host "Adding HTTP and HTTPS bindings..."
-    New-WebBinding -Name $SiteName -Protocol "http" -Port $PortHttp -IPAddress "*"
-    New-WebBinding -Name $SiteName -Protocol "https" -Port $PortHttps -IPAddress "*"
-} else {
-    Write-Host "Updating site path and restarting..."
+    Set-ItemProperty "IIS:\Sites\$SiteName" -Name bindings -Value @(
+      @{protocol="http"; bindingInformation="*:$PortHttp:"},
+      @{protocol="https"; bindingInformation="*:$PortHttps:"}
+    )
+  } else {
+    Write-Host "Updating existing site: $SiteName"
     Set-ItemProperty "IIS:\Sites\$SiteName" -Name physicalPath -Value $DeployPath
     Restart-WebAppPool -Name $AppPoolName
     Restart-WebSite -Name $SiteName
-}
+  }
 
-Write-Host "✅ Deployment to IIS completed successfully."
+  Write-Host "✅ Deployment complete."
+}
+catch {
+  Write-Error "❌ Deployment failed: $($_.Exception.Message)"
+  exit 1
+}
