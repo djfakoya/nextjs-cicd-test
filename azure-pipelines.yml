@@ -68,7 +68,7 @@ steps:
     targetType: 'filePath'
     filePath: '$(Build.SourcesDirectory)\scripts\deploy-to-iis.ps1'
     arguments: >
-      -ZipFilePath "$(Build.SourcesDirectory)\artifact\nextjs-app.zip"
+      -ZipFilePath "$(Build.SourcesDirectory)\artifact\nextjs-app\nextjs-app.zip"
       -UnzipPath "$(unzipPath)"
       -DeployPath "$(deployPath)"
       -AppPoolName "$(appPoolName)"
