@@ -69,10 +69,9 @@ steps:
     filePath: '$(Build.SourcesDirectory)\scripts\deploy-to-iis.ps1'
     arguments: >
       -ZipFilePath "$(Build.SourcesDirectory)\artifact\nextjs-app\nextjs-app.zip"
-      -UnzipPath "$(unzipPath)"
-      -DeployPath "$(deployPath)"
-      -AppPoolName "$(appPoolName)"
-      -SiteName "$(siteName)"
-      -PortHttp $(portHttp)
-      -PortHttps $(portHttps)
+      -DeployPath "C:\Cicd-frontend\MyNextJsApp"
+      -AppPoolName "AppPool_MyNextJsApp"
+      -SiteName "Optimus_MyNextJsApp"
+      -PortHttp 8026
+      -PortHttps 8025
     pwsh: false
