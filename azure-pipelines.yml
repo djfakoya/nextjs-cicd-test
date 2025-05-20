@@ -61,17 +61,17 @@ steps:
     artifactName: 'nextjs-app'
     downloadPath: '$(Build.SourcesDirectory)\artifact'
 
-# CD - Deploy to IIS via external script
-- task: PowerShell@2
-  displayName: 'Deploy to IIS via Script'
-  inputs:
-    targetType: 'filePath'
-    filePath: '$(Build.SourcesDirectory)\scripts\deploy-to-iis.ps1'
-    arguments: >
-      -ZipFilePath "$(Build.SourcesDirectory)\artifact\nextjs-app\nextjs-app.zip"
-      -DeployPath "C:\Cicd-frontend\MyNextJsApp"
-      -AppPoolName "AppPool_MyNextJsApp"
-      -SiteName "Optimus_MyNextJsApp"
-      -PortHttp 8026
-      -PortHttps 8025
-    pwsh: false
+# # CD - Deploy to IIS via external script
+# - task: PowerShell@2
+#   displayName: 'Deploy to IIS via Script'
+#   inputs:
+#     targetType: 'filePath'
+#     filePath: '$(Build.SourcesDirectory)\scripts\deploy-to-iis.ps1'
+#     arguments: >
+#       -ZipFilePath "$(Build.SourcesDirectory)\artifact\nextjs-app\nextjs-app.zip"
+#       -DeployPath "C:\Cicd-frontend\MyNextJsApp"
+#       -AppPoolName "AppPool_MyNextJsApp"
+#       -SiteName "Optimus_MyNextJsApp"
+#       -PortHttp 8026
+#       -PortHttps 8025
+#     pwsh: false
