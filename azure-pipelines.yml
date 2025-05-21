@@ -13,8 +13,6 @@ variables:
   deployPath: 'C:\\Cicd-frontend\\$(appName)'
   appPoolName: 'AppPool_$(appName)'
   zipPath: '$(Build.ArtifactStagingDirectory)\nextjs-app.zip'
-  # Note: No longer defining siteName as we'll use the parent site
-  # No longer defining port variables as we'll use parent site bindings
 
 steps:
 
@@ -90,31 +88,29 @@ steps:
   inputs:
     targetType: 'inline'
     script: |
-      # Check if Web-Server role is installed
+      $parentSiteName = "$(parentSite)"
+
+      # Check IIS feature
       $iisFeature = Get-WindowsFeature -Name Web-Server -ErrorAction SilentlyContinue
       if (-not $iisFeature.Installed) {
         Write-Warning "IIS Web-Server feature is not installed on this agent."
       } else {
         Write-Host "IIS Web-Server feature is installed."
       }
-      
-      # Test WebAdministration module
+
+      # Load WebAdministration
       try {
         Import-Module WebAdministration -ErrorAction Stop
         Write-Host "WebAdministration module is available."
       } catch {
         Write-Warning "WebAdministration module is not available. Error: $_"
-        # Try to install the module if not present
         if (Get-Command Install-WindowsFeature -ErrorAction SilentlyContinue) {
-          Write-Host "Attempting to install WebAdministration module..."
           Install-WindowsFeature -Name Web-Scripting-Tools -ErrorAction SilentlyContinue
         }
       }
-      
-      # Verify parent site exists
-      $parentSiteName = "$(parentSite)"
+
+      # Check parent site
       $parentSiteExists = Get-Website -Name $parentSiteName -ErrorAction SilentlyContinue
-      
       if (-not $parentSiteExists) {
         Write-Error "Parent site '$parentSiteName' does not exist. Cannot deploy child application."
         exit 1
@@ -122,144 +118,80 @@ steps:
         Write-Host "Parent site '$parentSiteName' exists with the following bindings:"
         $parentSiteExists.bindings.Collection | Format-Table protocol, bindingInformation -AutoSize
       }
-      
-      # List existing sites and app pools for reference
+
+      # Add port 8111 binding if missing
+      $bindingExists = $parentSiteExists.Bindings.Collection | Where-Object { $_.bindingInformation -match ":8111:" }
+      if (-not $bindingExists) {
+        Write-Host "Adding HTTP binding for port 8111..."
+        New-WebBinding -Name $parentSiteName -Protocol "http" -Port 8111 -IPAddress "*" -HostHeader ""
+        Write-Host "HTTP binding for port 8111 added."
+      } else {
+        Write-Host "Binding for port 8111 already exists."
+      }
+
       Write-Host "--- Existing IIS Sites ---"
       Get-Website | Format-Table Name, ID, State, PhysicalPath -AutoSize
-      
+
       Write-Host "--- Existing Applications ---"
       Get-WebApplication | Format-Table path, applicationPool, PhysicalPath -AutoSize
-      
+
       Write-Host "--- Existing Application Pools ---"
       Get-ChildItem IIS:\AppPools | Format-Table Name, State -AutoSize
     pwsh: false
     errorActionPreference: 'continue'
 
-# === CD: DEPLOY TO IIS AS CHILD APPLICATION - ENHANCED VERSION ===
+# === DEPLOY TO IIS ===
 - task: PowerShell@2
   displayName: 'Deploy as Child Application under Parent Site'
   inputs:
     targetType: 'inline'
     script: |
       $ErrorActionPreference = "Stop"
-      
-      try {
-        $zipPath = "$(Build.SourcesDirectory)\artifact\nextjs-app\nextjs-app.zip"
-        $deployPath = "$(deployPath)"
-        $appPool = "$(appPoolName)"
-        $parentSite = "$(parentSite)"
-        $appName = "$(appName)"
-        $appPath = "/$appName"  # Web application path under parent site
-        
-        Write-Host "Starting deployment process with following parameters:"
-        Write-Host "Zip Path: $zipPath"
-        Write-Host "Deploy Path: $deployPath"
-        Write-Host "App Pool: $appPool"
-        Write-Host "Parent Site: $parentSite"
-        Write-Host "Application Path: $appPath"
-        
-        # Verify the zip file exists
-        if (-not (Test-Path $zipPath)) {
-          throw "Zip file not found at path: $zipPath"
-        }
-        
-        # Verify parent site exists
-        $parentSiteExists = Get-Website -Name $parentSite -ErrorAction SilentlyContinue
-        if (-not $parentSiteExists) {
-          throw "Parent site '$parentSite' does not exist. Cannot deploy child application."
-        }
-        
-        Write-Host "Importing WebAdministration module..."
-        Import-Module WebAdministration
-        
-        Write-Host "Stopping existing App Pool if exists..."
-        if (Test-Path "IIS:\AppPools\$appPool") {
-          try {
-            if ((Get-WebAppPoolState -Name $appPool).Value -eq "Started") {
-              Stop-WebAppPool -Name $appPool
-              Write-Host "App Pool $appPool stopped successfully."
-            }
-          } catch {
-            Write-Warning "Error stopping app pool: $_"
-          }
-        } else {
-          Write-Host "App Pool $appPool does not exist yet. Will create new."
-        }
-        
-        Write-Host "Creating deploy directory if not exists..."
-        if (-not (Test-Path -Path $deployPath)) {
-          New-Item -ItemType Directory -Path $deployPath -Force | Out-Null
-          Write-Host "Created directory: $deployPath"
-        } else {
-          Write-Host "Directory already exists: $deployPath"
-          # Optional: Clean existing directory
-          Get-ChildItem -Path $deployPath -Recurse | Remove-Item -Force -Recurse
-          Write-Host "Cleaned existing directory contents"
-        }
-        
-        Write-Host "Extracting zip file to deploy directory..."
-        try {
-          Expand-Archive -Path $zipPath -DestinationPath $deployPath -Force
-          Write-Host "Successfully extracted files to $deployPath"
-          
-          # Count extracted files for verification
-          $extractedFiles = (Get-ChildItem -Path $deployPath -Recurse | Measure-Object).Count
-          Write-Host "Extracted $extractedFiles files/directories"
-        } catch {
-          throw "Failed to extract zip file: $_"
-        }
-        
-        Write-Host "Setting up IIS application..."
-        
-        # Create or update app pool
-        if (-not (Test-Path "IIS:\AppPools\$appPool")) {
-          Write-Host "Creating new App Pool: $appPool"
-          New-WebAppPool -Name $appPool
-          Set-ItemProperty -Path "IIS:\AppPools\$appPool" -Name managedRuntimeVersion -Value ""
-          Write-Host "App Pool created"
-        } else {
-          Write-Host "App Pool already exists: $appPool"
-        }
-        
-        # Create or update application under parent site
-        $appExists = Get-WebApplication -Name $appName -Site $parentSite -ErrorAction SilentlyContinue
-        
-        if ($appExists) {
-          Write-Host "Application '$appPath' already exists under site '$parentSite'. Updating properties..."
-          Set-ItemProperty -Path "IIS:\Sites\$parentSite$appPath" -Name physicalPath -Value $deployPath
-          Set-ItemProperty -Path "IIS:\Sites\$parentSite$appPath" -Name applicationPool -Value $appPool
-        } else {
-          Write-Host "Creating new application '$appPath' under site '$parentSite'..."
-          New-WebApplication -Name $appName -Site $parentSite -PhysicalPath $deployPath -ApplicationPool $appPool -Force
-        }
-        
-        Write-Host "Starting App Pool..."
-        Start-WebAppPool -Name $appPool
-        
-        # Verify app pool is running
-        $appPoolState = (Get-WebAppPoolState -Name $appPool).Value
-        if ($appPoolState -eq "Started") {
-          Write-Host "App Pool is running successfully"
-        } else {
-          Write-Warning "App Pool state is: $appPoolState"
-        }
-        
-        # Verify application is accessible
-        $app = Get-WebApplication -Name $appName -Site $parentSite
-        if ($app) {
-          Write-Host "Application deployed successfully under path: $appPath"
-          Write-Host "Full URL: http://<server-name>:$((Get-WebBinding -Name $parentSite).bindingInformation.Split(':')[1])$appPath"
-        } else {
-          Write-Warning "Application deployment verification failed."
-        }
-        
-        Write-Host "Deployment complete to IIS path: $deployPath"
-        
-      } catch {
-        Write-Error "Deployment failed with error: $_"
-        Write-Error $_.ScriptStackTrace
-        exit 1
+
+      $zipPath = "$(Build.SourcesDirectory)\artifact\nextjs-app\nextjs-app.zip"
+      $deployPath = "$(deployPath)"
+      $appPool = "$(appPoolName)"
+      $parentSite = "$(parentSite)"
+      $appName = "$(appName)"
+      $appPath = "/$appName"
+
+      if (-not (Test-Path $zipPath)) {
+        throw "Zip file not found: $zipPath"
       }
+
+      Import-Module WebAdministration
+
+      if (Test-Path "IIS:\AppPools\$appPool") {
+        if ((Get-WebAppPoolState -Name $appPool).Value -eq "Started") {
+          Stop-WebAppPool -Name $appPool
+        }
+      }
+
+      if (-not (Test-Path $deployPath)) {
+        New-Item -ItemType Directory -Path $deployPath -Force | Out-Null
+      } else {
+        Get-ChildItem -Path $deployPath -Recurse | Remove-Item -Force -Recurse
+      }
+
+      Expand-Archive -Path $zipPath -DestinationPath $deployPath -Force
+
+      if (-not (Test-Path "IIS:\AppPools\$appPool")) {
+        New-WebAppPool -Name $appPool
+        Set-ItemProperty -Path "IIS:\AppPools\$appPool" -Name managedRuntimeVersion -Value ""
+      }
+
+      $appExists = Get-WebApplication -Name $appName -Site $parentSite -ErrorAction SilentlyContinue
+      if ($appExists) {
+        Set-ItemProperty -Path "IIS:\Sites\$parentSite$appPath" -Name physicalPath -Value $deployPath
+        Set-ItemProperty -Path "IIS:\Sites\$parentSite$appPath" -Name applicationPool -Value $appPool
+      } else {
+        New-WebApplication -Name $appName -Site $parentSite -PhysicalPath $deployPath -ApplicationPool $appPool -Force
+      }
+
+      Start-WebAppPool -Name $appPool
+
+      Write-Host "Application deployed successfully under path: $appPath"
+      Write-Host "Full URL: http://<server-name>:8111$appPath"
     pwsh: false
     errorActionPreference: 'stop'
 
