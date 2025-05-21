@@ -8,14 +8,13 @@ pool:
 
 variables:
   appName: 'MyNextJsApp'
-  parentSite: 'Optimus Apps'
+  parentSite: 'Optimus Apps'  # Parent site name
   unzipPath: 'C:\\Cicd-frontend'
   deployPath: 'C:\\Cicd-frontend\\$(appName)'
-  siteName: 'Optimus_$(appName)'
   appPoolName: 'AppPool_$(appName)'
-  portHttp: 8026
-  portHttps: 8025
   zipPath: '$(Build.ArtifactStagingDirectory)\nextjs-app.zip'
+  # Note: No longer defining siteName as we'll use the parent site
+  # No longer defining port variables as we'll use parent site bindings
 
 steps:
 
@@ -87,7 +86,7 @@ steps:
 
 # === VERIFY IIS FEATURES ARE INSTALLED ===
 - task: PowerShell@2
-  displayName: 'Verify IIS Prerequisites'
+  displayName: 'Verify IIS Prerequisites and Parent Site'
   inputs:
     targetType: 'inline'
     script: |
@@ -112,26 +111,33 @@ steps:
         }
       }
       
+      # Verify parent site exists
+      $parentSiteName = "$(parentSite)"
+      $parentSiteExists = Get-Website -Name $parentSiteName -ErrorAction SilentlyContinue
+      
+      if (-not $parentSiteExists) {
+        Write-Error "Parent site '$parentSiteName' does not exist. Cannot deploy child application."
+        exit 1
+      } else {
+        Write-Host "Parent site '$parentSiteName' exists with the following bindings:"
+        $parentSiteExists.bindings.Collection | Format-Table protocol, bindingInformation -AutoSize
+      }
+      
       # List existing sites and app pools for reference
       Write-Host "--- Existing IIS Sites ---"
       Get-Website | Format-Table Name, ID, State, PhysicalPath -AutoSize
       
+      Write-Host "--- Existing Applications ---"
+      Get-WebApplication | Format-Table path, applicationPool, PhysicalPath -AutoSize
+      
       Write-Host "--- Existing Application Pools ---"
       Get-ChildItem IIS:\AppPools | Format-Table Name, State -AutoSize
-      
-      # Check if ports are in use
-      $httpPortInUse = Get-NetTCPConnection -LocalPort $(portHttp) -ErrorAction SilentlyContinue
-      if ($httpPortInUse) {
-        Write-Warning "HTTP Port $(portHttp) is already in use."
-      } else {
-        Write-Host "HTTP Port $(portHttp) is available."
-      }
     pwsh: false
     errorActionPreference: 'continue'
 
-# === CD: DEPLOY TO IIS - ENHANCED VERSION ===
+# === CD: DEPLOY TO IIS AS CHILD APPLICATION - ENHANCED VERSION ===
 - task: PowerShell@2
-  displayName: 'Deploy to IIS via PowerShell script'
+  displayName: 'Deploy as Child Application under Parent Site'
   inputs:
     targetType: 'inline'
     script: |
@@ -141,25 +147,26 @@ steps:
         $zipPath = "$(Build.SourcesDirectory)\artifact\nextjs-app\nextjs-app.zip"
         $deployPath = "$(deployPath)"
         $appPool = "$(appPoolName)"
-        $siteName = "$(siteName)"
-        $portHttp = $(portHttp)
-        $portHttps = $(portHttps)
+        $parentSite = "$(parentSite)"
+        $appName = "$(appName)"
+        $appPath = "/$appName"  # Web application path under parent site
         
         Write-Host "Starting deployment process with following parameters:"
         Write-Host "Zip Path: $zipPath"
         Write-Host "Deploy Path: $deployPath"
         Write-Host "App Pool: $appPool"
-        Write-Host "Site Name: $siteName"
-        Write-Host "HTTP Port: $portHttp"
+        Write-Host "Parent Site: $parentSite"
+        Write-Host "Application Path: $appPath"
         
         # Verify the zip file exists
         if (-not (Test-Path $zipPath)) {
           throw "Zip file not found at path: $zipPath"
         }
         
-        Write-Host "Verifying WebAdministration module..."
-        if (-not (Get-Module -ListAvailable -Name WebAdministration)) {
-          throw "WebAdministration module is not available. Please install IIS with Web-Scripting-Tools."
+        # Verify parent site exists
+        $parentSiteExists = Get-Website -Name $parentSite -ErrorAction SilentlyContinue
+        if (-not $parentSiteExists) {
+          throw "Parent site '$parentSite' does not exist. Cannot deploy child application."
         }
         
         Write-Host "Importing WebAdministration module..."
@@ -202,7 +209,7 @@ steps:
           throw "Failed to extract zip file: $_"
         }
         
-        Write-Host "Setting up IIS site..."
+        Write-Host "Setting up IIS application..."
         
         # Create or update app pool
         if (-not (Test-Path "IIS:\AppPools\$appPool")) {
@@ -214,36 +221,36 @@ steps:
           Write-Host "App Pool already exists: $appPool"
         }
         
-        # Create or update website
-        if (-not (Test-Path "IIS:\Sites\$siteName")) {
-          Write-Host "Creating new Website: $siteName"
-          # Check if port is already in use by another site
-          $existingSite = Get-Website | Where-Object { 
-            $_.Bindings.Collection | Where-Object { $_.BindingInformation -like "*:$($portHttp):*" }
-          }
-          
-          if ($existingSite) {
-            Write-Warning "Port $portHttp is already in use by site: $($existingSite.Name)"
-            # You could choose to stop the other site or use a different port
-          }
-          
-          New-Website -Name $siteName -PhysicalPath $deployPath -ApplicationPool $appPool -Port $portHttp -Force
-          Write-Host "Website created with binding to port $portHttp"
+        # Create or update application under parent site
+        $appExists = Get-WebApplication -Name $appName -Site $parentSite -ErrorAction SilentlyContinue
+        
+        if ($appExists) {
+          Write-Host "Application '$appPath' already exists under site '$parentSite'. Updating properties..."
+          Set-ItemProperty -Path "IIS:\Sites\$parentSite$appPath" -Name physicalPath -Value $deployPath
+          Set-ItemProperty -Path "IIS:\Sites\$parentSite$appPath" -Name applicationPool -Value $appPool
         } else {
-          Write-Host "Website already exists: $siteName, updating physical path"
-          Set-ItemProperty -Path "IIS:\Sites\$siteName" -Name physicalPath -Value $deployPath
+          Write-Host "Creating new application '$appPath' under site '$parentSite'..."
+          New-WebApplication -Name $appName -Site $parentSite -PhysicalPath $deployPath -ApplicationPool $appPool -Force
         }
         
-        Write-Host "Starting App Pool and Site..."
+        Write-Host "Starting App Pool..."
         Start-WebAppPool -Name $appPool
-        Start-Website -Name $siteName
         
-        # Verify site is running
-        $site = Get-Website -Name $siteName
-        if ($site.State -eq "Started") {
-          Write-Host "Website is running successfully"
+        # Verify app pool is running
+        $appPoolState = (Get-WebAppPoolState -Name $appPool).Value
+        if ($appPoolState -eq "Started") {
+          Write-Host "App Pool is running successfully"
         } else {
-          Write-Warning "Website state is: $($site.State)"
+          Write-Warning "App Pool state is: $appPoolState"
+        }
+        
+        # Verify application is accessible
+        $app = Get-WebApplication -Name $appName -Site $parentSite
+        if ($app) {
+          Write-Host "Application deployed successfully under path: $appPath"
+          Write-Host "Full URL: http://<server-name>:$((Get-WebBinding -Name $parentSite).bindingInformation.Split(':')[1])$appPath"
+        } else {
+          Write-Warning "Application deployment verification failed."
         }
         
         Write-Host "Deployment complete to IIS path: $deployPath"
