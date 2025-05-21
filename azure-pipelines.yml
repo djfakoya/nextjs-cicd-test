@@ -22,10 +22,11 @@ steps:
 # === CLEAN MEMORY PRE-STEP ===
 - script: |
     echo Cleaning system memory...
-    powershell -Command "Clear-EventLog -LogName *"
+    powershell -Command "Clear-EventLog -LogName * -ErrorAction SilentlyContinue"
     powershell -Command "[System.GC]::Collect()"
-    powershell -Command "Start-Process -NoNewWindow -FilePath 'cleanmgr.exe' -ArgumentList '/sagerun:1'"
+    powershell -Command "if (Test-Path 'cleanmgr.exe') { Start-Process -NoNewWindow -FilePath 'cleanmgr.exe' -ArgumentList '/sagerun:1' }"
   displayName: 'Free system memory and clean logs (pre-build)'
+  continueOnError: true
 
 # === INSTALL NODE ===
 - task: NodeTool@0
@@ -55,7 +56,11 @@ steps:
 # === ZIP BUILD ARTIFACTS ===
 - script: |
     echo Zipping build artifacts...
+    powershell -Command "if (!(Test-Path '.next')) { Write-Error '.next directory not found!'; exit 1 }"
+    powershell -Command "Get-ChildItem -Path '.next' -Recurse | Measure-Object | Select-Object -ExpandProperty Count"
     powershell Compress-Archive -Path .next\* -DestinationPath "$(zipPath)" -Force
+    powershell -Command "if (!(Test-Path '$(zipPath)')) { Write-Error 'Zip file was not created!'; exit 1 }"
+    powershell -Command "Get-Item '$(zipPath)' | Select-Object Length"
   displayName: 'Zip build artifacts'
 
 # === PUBLISH BUILD ARTIFACT ===
@@ -73,52 +78,188 @@ steps:
     downloadPath: '$(Build.SourcesDirectory)\artifact'
   displayName: 'Download build artifact for deployment'
 
-# === CD: DEPLOY TO IIS ===
+# === VERIFY DOWNLOADED ARTIFACT ===
+- script: |
+    echo Verifying downloaded artifact...
+    powershell -Command "if (!(Test-Path '$(Build.SourcesDirectory)\artifact\nextjs-app\nextjs-app.zip')) { Write-Error 'Downloaded zip file not found!'; exit 1 }"
+    powershell -Command "Get-Item '$(Build.SourcesDirectory)\artifact\nextjs-app\nextjs-app.zip' | Select-Object Length"
+  displayName: 'Verify downloaded artifact'
+
+# === VERIFY IIS FEATURES ARE INSTALLED ===
+- task: PowerShell@2
+  displayName: 'Verify IIS Prerequisites'
+  inputs:
+    targetType: 'inline'
+    script: |
+      # Check if Web-Server role is installed
+      $iisFeature = Get-WindowsFeature -Name Web-Server -ErrorAction SilentlyContinue
+      if (-not $iisFeature.Installed) {
+        Write-Warning "IIS Web-Server feature is not installed on this agent."
+      } else {
+        Write-Host "IIS Web-Server feature is installed."
+      }
+      
+      # Test WebAdministration module
+      try {
+        Import-Module WebAdministration -ErrorAction Stop
+        Write-Host "WebAdministration module is available."
+      } catch {
+        Write-Warning "WebAdministration module is not available. Error: $_"
+        # Try to install the module if not present
+        if (Get-Command Install-WindowsFeature -ErrorAction SilentlyContinue) {
+          Write-Host "Attempting to install WebAdministration module..."
+          Install-WindowsFeature -Name Web-Scripting-Tools -ErrorAction SilentlyContinue
+        }
+      }
+      
+      # List existing sites and app pools for reference
+      Write-Host "--- Existing IIS Sites ---"
+      Get-Website | Format-Table Name, ID, State, PhysicalPath -AutoSize
+      
+      Write-Host "--- Existing Application Pools ---"
+      Get-ChildItem IIS:\AppPools | Format-Table Name, State -AutoSize
+      
+      # Check if ports are in use
+      $httpPortInUse = Get-NetTCPConnection -LocalPort $(portHttp) -ErrorAction SilentlyContinue
+      if ($httpPortInUse) {
+        Write-Warning "HTTP Port $(portHttp) is already in use."
+      } else {
+        Write-Host "HTTP Port $(portHttp) is available."
+      }
+    pwsh: false
+    errorActionPreference: 'continue'
+
+# === CD: DEPLOY TO IIS - ENHANCED VERSION ===
 - task: PowerShell@2
   displayName: 'Deploy to IIS via PowerShell script'
   inputs:
     targetType: 'inline'
     script: |
-      $zipPath = "$(Build.SourcesDirectory)\artifact\nextjs-app\nextjs-app.zip"
-      $deployPath = "$(deployPath)"
-      $appPool = "$(appPoolName)"
-      $siteName = "$(siteName)"
-      $portHttp = $(portHttp)
-      $portHttps = $(portHttps)
-
-      Write-Host "Stopping existing App Pool if exists..."
-      if (Get-WebAppPoolState -Name $appPool -ErrorAction SilentlyContinue) {
-        Stop-WebAppPool -Name $appPool
+      $ErrorActionPreference = "Stop"
+      
+      try {
+        $zipPath = "$(Build.SourcesDirectory)\artifact\nextjs-app\nextjs-app.zip"
+        $deployPath = "$(deployPath)"
+        $appPool = "$(appPoolName)"
+        $siteName = "$(siteName)"
+        $portHttp = $(portHttp)
+        $portHttps = $(portHttps)
+        
+        Write-Host "Starting deployment process with following parameters:"
+        Write-Host "Zip Path: $zipPath"
+        Write-Host "Deploy Path: $deployPath"
+        Write-Host "App Pool: $appPool"
+        Write-Host "Site Name: $siteName"
+        Write-Host "HTTP Port: $portHttp"
+        
+        # Verify the zip file exists
+        if (-not (Test-Path $zipPath)) {
+          throw "Zip file not found at path: $zipPath"
+        }
+        
+        Write-Host "Verifying WebAdministration module..."
+        if (-not (Get-Module -ListAvailable -Name WebAdministration)) {
+          throw "WebAdministration module is not available. Please install IIS with Web-Scripting-Tools."
+        }
+        
+        Write-Host "Importing WebAdministration module..."
+        Import-Module WebAdministration
+        
+        Write-Host "Stopping existing App Pool if exists..."
+        if (Test-Path "IIS:\AppPools\$appPool") {
+          try {
+            if ((Get-WebAppPoolState -Name $appPool).Value -eq "Started") {
+              Stop-WebAppPool -Name $appPool
+              Write-Host "App Pool $appPool stopped successfully."
+            }
+          } catch {
+            Write-Warning "Error stopping app pool: $_"
+          }
+        } else {
+          Write-Host "App Pool $appPool does not exist yet. Will create new."
+        }
+        
+        Write-Host "Creating deploy directory if not exists..."
+        if (-not (Test-Path -Path $deployPath)) {
+          New-Item -ItemType Directory -Path $deployPath -Force | Out-Null
+          Write-Host "Created directory: $deployPath"
+        } else {
+          Write-Host "Directory already exists: $deployPath"
+          # Optional: Clean existing directory
+          Get-ChildItem -Path $deployPath -Recurse | Remove-Item -Force -Recurse
+          Write-Host "Cleaned existing directory contents"
+        }
+        
+        Write-Host "Extracting zip file to deploy directory..."
+        try {
+          Expand-Archive -Path $zipPath -DestinationPath $deployPath -Force
+          Write-Host "Successfully extracted files to $deployPath"
+          
+          # Count extracted files for verification
+          $extractedFiles = (Get-ChildItem -Path $deployPath -Recurse | Measure-Object).Count
+          Write-Host "Extracted $extractedFiles files/directories"
+        } catch {
+          throw "Failed to extract zip file: $_"
+        }
+        
+        Write-Host "Setting up IIS site..."
+        
+        # Create or update app pool
+        if (-not (Test-Path "IIS:\AppPools\$appPool")) {
+          Write-Host "Creating new App Pool: $appPool"
+          New-WebAppPool -Name $appPool
+          Set-ItemProperty -Path "IIS:\AppPools\$appPool" -Name managedRuntimeVersion -Value ""
+          Write-Host "App Pool created"
+        } else {
+          Write-Host "App Pool already exists: $appPool"
+        }
+        
+        # Create or update website
+        if (-not (Test-Path "IIS:\Sites\$siteName")) {
+          Write-Host "Creating new Website: $siteName"
+          # Check if port is already in use by another site
+          $existingSite = Get-Website | Where-Object { 
+            $_.Bindings.Collection | Where-Object { $_.BindingInformation -like "*:$($portHttp):*" }
+          }
+          
+          if ($existingSite) {
+            Write-Warning "Port $portHttp is already in use by site: $($existingSite.Name)"
+            # You could choose to stop the other site or use a different port
+          }
+          
+          New-Website -Name $siteName -PhysicalPath $deployPath -ApplicationPool $appPool -Port $portHttp -Force
+          Write-Host "Website created with binding to port $portHttp"
+        } else {
+          Write-Host "Website already exists: $siteName, updating physical path"
+          Set-ItemProperty -Path "IIS:\Sites\$siteName" -Name physicalPath -Value $deployPath
+        }
+        
+        Write-Host "Starting App Pool and Site..."
+        Start-WebAppPool -Name $appPool
+        Start-Website -Name $siteName
+        
+        # Verify site is running
+        $site = Get-Website -Name $siteName
+        if ($site.State -eq "Started") {
+          Write-Host "Website is running successfully"
+        } else {
+          Write-Warning "Website state is: $($site.State)"
+        }
+        
+        Write-Host "Deployment complete to IIS path: $deployPath"
+        
+      } catch {
+        Write-Error "Deployment failed with error: $_"
+        Write-Error $_.ScriptStackTrace
+        exit 1
       }
-
-      Write-Host "Creating deploy directory if not exists..."
-      if (!(Test-Path -Path $deployPath)) {
-        New-Item -ItemType Directory -Path $deployPath | Out-Null
-      }
-
-      Write-Host "Extracting zip file to deploy directory..."
-      Expand-Archive -Path $zipPath -DestinationPath $deployPath -Force
-
-      Write-Host "Setting up IIS site..."
-      Import-Module WebAdministration
-
-      if (!(Test-Path "IIS:\Sites\$siteName")) {
-        New-WebAppPool -Name $appPool
-        New-Website -Name $siteName -Port $portHttp -IPAddress "*" -PhysicalPath $deployPath -ApplicationPool $appPool
-      } else {
-        Set-ItemProperty "IIS:\Sites\$siteName" -Name physicalPath -Value $deployPath
-      }
-
-      Write-Host "Starting App Pool and Site..."
-      Start-WebAppPool -Name $appPool
-      Start-Website -Name $siteName
-
-      Write-Host "Deployment complete to IIS path: $deployPath"
-      pwsh: false
+    pwsh: false
+    errorActionPreference: 'stop'
 
 # === CLEAN MEMORY POST-DEPLOY ===
 - script: | 
     echo Final memory cleanup...
     powershell -Command "[System.GC]::Collect()"
-    powershell -Command "Clear-RecycleBin -Force"
+    powershell -Command "if (Test-Path function:Clear-RecycleBin) { Clear-RecycleBin -Force -ErrorAction SilentlyContinue }"
   displayName: 'Post-deploy memory cleanup'
+  continueOnError: true
