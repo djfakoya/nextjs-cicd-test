@@ -18,36 +18,47 @@ variables:
   zipPath: '$(Build.ArtifactStagingDirectory)\nextjs-app.zip'
 
 steps:
-# Install Node.js
+
+# === CLEAN MEMORY PRE-STEP ===
+- script: |
+    echo Cleaning system memory...
+    powershell -Command "Clear-EventLog -LogName *"
+    powershell -Command "[System.GC]::Collect()"
+    powershell -Command "Start-Process -NoNewWindow -FilePath 'cleanmgr.exe' -ArgumentList '/sagerun:1'"
+  displayName: 'Free system memory and clean logs (pre-build)'
+
+# === INSTALL NODE ===
 - task: NodeTool@0
   inputs:
     versionSpec: '22.x'
   displayName: 'Install Node.js'
 
-# Install dependencies
+# === INSTALL DEPENDENCIES ===
 - script: |
     echo Installing dependencies...
     npm install
-    echo Cleaning npm cache...
+    echo Cleaning npm and yarn cache...
     npm cache clean --force
-  displayName: 'Install dependencies'
+    if exist "%LocalAppData%\Yarn\Cache" rmdir /s /q "%LocalAppData%\Yarn\Cache"
+  displayName: 'Install dependencies and clean npm/yarn cache'
 
-# Build the Next.js app
+# === BUILD APP & CLEAN CACHE ===
 - script: |
     echo Building the Next.js app...
     npm run build
-    echo Cleaning up cache...
+
+    echo Removing build caches...
     if exist node_modules\.cache rmdir /s /q node_modules\.cache
     if exist .next\cache rmdir /s /q .next\cache
-  displayName: 'Build Next.js app and clean up'
+  displayName: 'Build Next.js and remove build cache'
 
-# Zip the .next folder
+# === ZIP BUILD ARTIFACTS ===
 - script: |
     echo Zipping build artifacts...
     powershell Compress-Archive -Path .next\* -DestinationPath "$(zipPath)" -Force
   displayName: 'Zip build artifacts'
 
-# Publish zipped artifact
+# === PUBLISH BUILD ARTIFACT ===
 - task: PublishBuildArtifacts@1
   inputs:
     pathToPublish: '$(zipPath)'
@@ -55,23 +66,59 @@ steps:
     publishLocation: 'Container'
   displayName: 'Publish zipped artifact'
 
-# Download build artifact
+# === DOWNLOAD ARTIFACT FOR DEPLOYMENT ===
 - task: DownloadBuildArtifacts@0
   inputs:
     artifactName: 'nextjs-app'
     downloadPath: '$(Build.SourcesDirectory)\artifact'
+  displayName: 'Download build artifact for deployment'
 
-# # CD - Deploy to IIS via external script
-# - task: PowerShell@2
-#   displayName: 'Deploy to IIS via Script'
-#   inputs:
-#     targetType: 'filePath'
-#     filePath: '$(Build.SourcesDirectory)\scripts\deploy-to-iis.ps1'
-#     arguments: >
-#       -ZipFilePath "$(Build.SourcesDirectory)\artifact\nextjs-app\nextjs-app.zip"
-#       -DeployPath "C:\Cicd-frontend\MyNextJsApp"
-#       -AppPoolName "AppPool_MyNextJsApp"
-#       -SiteName "Optimus_MyNextJsApp"
-#       -PortHttp 8026
-#       -PortHttps 8025
-#     pwsh: false
+# === CD: DEPLOY TO IIS ===
+- task: PowerShell@2
+  displayName: 'Deploy to IIS via PowerShell script'
+  inputs:
+    targetType: 'inline'
+    script: |
+      $zipPath = "$(Build.SourcesDirectory)\artifact\nextjs-app\nextjs-app.zip"
+      $deployPath = "$(deployPath)"
+      $appPool = "$(appPoolName)"
+      $siteName = "$(siteName)"
+      $portHttp = $(portHttp)
+      $portHttps = $(portHttps)
+
+      Write-Host "Stopping existing App Pool if exists..."
+      if (Get-WebAppPoolState -Name $appPool -ErrorAction SilentlyContinue) {
+        Stop-WebAppPool -Name $appPool
+      }
+
+      Write-Host "Creating deploy directory if not exists..."
+      if (!(Test-Path -Path $deployPath)) {
+        New-Item -ItemType Directory -Path $deployPath | Out-Null
+      }
+
+      Write-Host "Extracting zip file to deploy directory..."
+      Expand-Archive -Path $zipPath -DestinationPath $deployPath -Force
+
+      Write-Host "Setting up IIS site..."
+      Import-Module WebAdministration
+
+      if (!(Test-Path "IIS:\Sites\$siteName")) {
+        New-WebAppPool -Name $appPool
+        New-Website -Name $siteName -Port $portHttp -IPAddress "*" -PhysicalPath $deployPath -ApplicationPool $appPool
+      } else {
+        Set-ItemProperty "IIS:\Sites\$siteName" -Name physicalPath -Value $deployPath
+      }
+
+      Write-Host "Starting App Pool and Site..."
+      Start-WebAppPool -Name $appPool
+      Start-Website -Name $siteName
+
+      Write-Host "Deployment complete to IIS path: $deployPath"
+      pwsh: false
+
+# === CLEAN MEMORY POST-DEPLOY ===
+- script: | 
+    echo Final memory cleanup...
+    powershell -Command "[System.GC]::Collect()"
+    powershell -Command "Clear-RecycleBin -Force"
+  displayName: 'Post-deploy memory cleanup'
