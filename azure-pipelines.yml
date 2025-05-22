@@ -8,11 +8,15 @@ pool:
 
 variables:
   appName: 'MyNextJsApp'
+  projectName: '$(appName)'  # Using appName as projectName for consistency
   parentSite: 'Optimus Apps'  # Parent site name
-  unzipPath: 'C:\\Cicd-frontend'
-  deployPath: 'C:\\Cicd-frontend\\$(appName)'
-  appPoolName: 'AppPool_$(appName)'
+  baseDeployPath: 'C:\\Cicd-frontend'
+  deployPath: '$(baseDeployPath)\\$(projectName)'
+  appPoolName: '$(projectName)Pool'  # ProjectName + Pool format
   zipPath: '$(Build.ArtifactStagingDirectory)\nextjs-app.zip'
+  versionNumber: '$(Build.BuildNumber)'  # Use build number as version
+  # Note: No longer defining siteName as we'll use the parent site
+  # No longer defining port variables as we'll use parent site bindings
 
 steps:
 
@@ -88,29 +92,31 @@ steps:
   inputs:
     targetType: 'inline'
     script: |
-      $parentSiteName = "$(parentSite)"
-
-      # Check IIS feature
+      # Check if Web-Server role is installed
       $iisFeature = Get-WindowsFeature -Name Web-Server -ErrorAction SilentlyContinue
       if (-not $iisFeature.Installed) {
         Write-Warning "IIS Web-Server feature is not installed on this agent."
       } else {
         Write-Host "IIS Web-Server feature is installed."
       }
-
-      # Load WebAdministration
+      
+      # Test WebAdministration module
       try {
         Import-Module WebAdministration -ErrorAction Stop
         Write-Host "WebAdministration module is available."
       } catch {
         Write-Warning "WebAdministration module is not available. Error: $_"
+        # Try to install the module if not present
         if (Get-Command Install-WindowsFeature -ErrorAction SilentlyContinue) {
+          Write-Host "Attempting to install WebAdministration module..."
           Install-WindowsFeature -Name Web-Scripting-Tools -ErrorAction SilentlyContinue
         }
       }
-
-      # Check parent site
+      
+      # Verify parent site exists
+      $parentSiteName = "$(parentSite)"
       $parentSiteExists = Get-Website -Name $parentSiteName -ErrorAction SilentlyContinue
+      
       if (-not $parentSiteExists) {
         Write-Error "Parent site '$parentSiteName' does not exist. Cannot deploy child application."
         exit 1
@@ -118,80 +124,205 @@ steps:
         Write-Host "Parent site '$parentSiteName' exists with the following bindings:"
         $parentSiteExists.bindings.Collection | Format-Table protocol, bindingInformation -AutoSize
       }
-
-      # Add port 8111 binding if missing
-      $bindingExists = $parentSiteExists.Bindings.Collection | Where-Object { $_.bindingInformation -match ":8111:" }
-      if (-not $bindingExists) {
-        Write-Host "Adding HTTP binding for port 8111..."
-        New-WebBinding -Name $parentSiteName -Protocol "http" -Port 8111 -IPAddress "*" -HostHeader ""
-        Write-Host "HTTP binding for port 8111 added."
-      } else {
-        Write-Host "Binding for port 8111 already exists."
-      }
-
+      
+      # List existing sites and app pools for reference
       Write-Host "--- Existing IIS Sites ---"
       Get-Website | Format-Table Name, ID, State, PhysicalPath -AutoSize
-
+      
       Write-Host "--- Existing Applications ---"
       Get-WebApplication | Format-Table path, applicationPool, PhysicalPath -AutoSize
-
+      
       Write-Host "--- Existing Application Pools ---"
       Get-ChildItem IIS:\AppPools | Format-Table Name, State -AutoSize
     pwsh: false
     errorActionPreference: 'continue'
 
-# === DEPLOY TO IIS ===
+# === ENHANCED IIS DEPLOYMENT WITH VERSIONING ===
 - task: PowerShell@2
-  displayName: 'Deploy as Child Application under Parent Site'
+  displayName: 'Deploy with Enhanced IIS Configuration and Versioning'
   inputs:
     targetType: 'inline'
     script: |
       $ErrorActionPreference = "Stop"
-
-      $zipPath = "$(Build.SourcesDirectory)\artifact\nextjs-app\nextjs-app.zip"
-      $deployPath = "$(deployPath)"
-      $appPool = "$(appPoolName)"
-      $parentSite = "$(parentSite)"
-      $appName = "$(appName)"
-      $appPath = "/$appName"
-
-      if (-not (Test-Path $zipPath)) {
-        throw "Zip file not found: $zipPath"
-      }
-
-      Import-Module WebAdministration
-
-      if (Test-Path "IIS:\AppPools\$appPool") {
-        if ((Get-WebAppPoolState -Name $appPool).Value -eq "Started") {
-          Stop-WebAppPool -Name $appPool
+      
+      try {
+        $zipPath = "$(Build.SourcesDirectory)\artifact\nextjs-app\nextjs-app.zip"
+        $baseDeployPath = "$(baseDeployPath)"
+        $projectName = "$(projectName)"
+        $appPool = "$(appPoolName)"
+        $parentSite = "$(parentSite)"
+        $versionNumber = "$(versionNumber)"
+        $appPath = "/$projectName"  # Web application path under parent site
+        
+        Write-Host "=== ENHANCED IIS DEPLOYMENT STARTING ==="
+        Write-Host "Project Name: $projectName"
+        Write-Host "Base Deploy Path: $baseDeployPath"
+        Write-Host "App Pool Name: $appPool"
+        Write-Host "Parent Site: $parentSite"
+        Write-Host "Version Number: $versionNumber"
+        Write-Host "Application Path: $appPath"
+        
+        # 1. ENSURE BASE DEPLOYMENT DIRECTORY EXISTS
+        Write-Host "=== STEP 1: Ensure Base Directory Exists ==="
+        if (-not (Test-Path -Path $baseDeployPath)) {
+          Write-Host "Base directory does not exist. Creating: $baseDeployPath"
+          New-Item -ItemType Directory -Path $baseDeployPath -Force | Out-Null
+          Write-Host "Successfully created base directory: $baseDeployPath"
+        } else {
+          Write-Host "Base directory already exists: $baseDeployPath"
         }
+        
+        # Verify the zip file exists
+        if (-not (Test-Path $zipPath)) {
+          throw "Zip file not found at path: $zipPath"
+        }
+        
+        # Verify parent site exists
+        $parentSiteExists = Get-Website -Name $parentSite -ErrorAction SilentlyContinue
+        if (-not $parentSiteExists) {
+          throw "Parent site '$parentSite' does not exist. Cannot deploy child application."
+        }
+        
+        Write-Host "Importing WebAdministration module..."
+        Import-Module WebAdministration
+        
+        # 2. APPLICATION POOL MANAGEMENT
+        Write-Host "=== STEP 2: Application Pool Management ==="
+        if (-not (Test-Path "IIS:\AppPools\$appPool")) {
+          Write-Host "Creating new Application Pool: $appPool"
+          New-WebAppPool -Name $appPool
+          Set-ItemProperty -Path "IIS:\AppPools\$appPool" -Name managedRuntimeVersion -Value ""
+          Write-Host "Application Pool '$appPool' created successfully"
+        } else {
+          Write-Host "Application Pool '$appPool' already exists. Reusing existing pool."
+          # Stop the existing pool for deployment
+          try {
+            if ((Get-WebAppPoolState -Name $appPool).Value -eq "Started") {
+              Stop-WebAppPool -Name $appPool
+              Write-Host "Existing App Pool '$appPool' stopped for deployment."
+            }
+          } catch {
+            Write-Warning "Error stopping app pool: $_"
+          }
+        }
+        
+        # 3. IIS SITE MANAGEMENT
+        Write-Host "=== STEP 3: IIS Site Management ==="
+        $standaloneProjectSite = Get-Website -Name $projectName -ErrorAction SilentlyContinue
+        if (-not $standaloneProjectSite) {
+          Write-Host "Creating new IIS Site: $projectName"
+          # We'll create the site but configure it properly after determining the physical path
+        } else {
+          Write-Host "IIS Site '$projectName' already exists. Continuing with existing site."
+        }
+        
+        # 4. PHYSICAL PATH AND VERSIONING
+        Write-Host "=== STEP 4: Physical Path and Versioning ==="
+        $projectFolderPath = Join-Path $baseDeployPath $projectName
+        $finalDeployPath = $projectFolderPath
+        
+        if (Test-Path -Path $projectFolderPath) {
+          Write-Host "Project folder '$projectName' already exists in base directory."
+          Write-Host "Creating versioned folder..."
+          
+          # Find the next version number
+          $existingVersions = Get-ChildItem -Path $baseDeployPath -Directory | Where-Object { $_.Name -match "^c\d+$" }
+          $nextVersionNum = 1
+          if ($existingVersions) {
+            $maxVersion = ($existingVersions | ForEach-Object { [int]($_.Name -replace '^c', '') } | Measure-Object -Maximum).Maximum
+            $nextVersionNum = $maxVersion + 1
+          }
+          
+          $versionedFolderName = "c$nextVersionNum"
+          $finalDeployPath = Join-Path $baseDeployPath $versionedFolderName
+          
+          Write-Host "Using versioned folder: $versionedFolderName"
+          Write-Host "Final deploy path: $finalDeployPath"
+        } else {
+          Write-Host "Project folder does not exist yet. Using: $finalDeployPath"
+        }
+        
+        # Create the deployment directory
+        if (-not (Test-Path -Path $finalDeployPath)) {
+          New-Item -ItemType Directory -Path $finalDeployPath -Force | Out-Null
+          Write-Host "Created deployment directory: $finalDeployPath"
+        } else {
+          Write-Host "Deployment directory exists. Cleaning contents..."
+          Get-ChildItem -Path $finalDeployPath -Recurse | Remove-Item -Force -Recurse
+          Write-Host "Cleaned existing directory contents"
+        }
+        
+        Write-Host "Extracting zip file to deployment directory..."
+        try {
+          Expand-Archive -Path $zipPath -DestinationPath $finalDeployPath -Force
+          Write-Host "Successfully extracted files to $finalDeployPath"
+          
+          # Count extracted files for verification
+          $extractedFiles = (Get-ChildItem -Path $finalDeployPath -Recurse | Measure-Object).Count
+          Write-Host "Extracted $extractedFiles files/directories"
+        } catch {
+          throw "Failed to extract zip file: $_"
+        }
+        
+        # Now create or update the standalone IIS site with the final path
+        if (-not $standaloneProjectSite) {
+          Write-Host "Creating IIS Site '$projectName' with physical path: $finalDeployPath"
+          # Use a default port (you may want to make this configurable)
+          New-Website -Name $projectName -PhysicalPath $finalDeployPath -ApplicationPool $appPool -Port 8080
+          Write-Host "IIS Site '$projectName' created successfully"
+        } else {
+          Write-Host "Updating existing IIS Site '$projectName' physical path to: $finalDeployPath"
+          Set-ItemProperty -Path "IIS:\Sites\$projectName" -Name physicalPath -Value $finalDeployPath
+          Set-ItemProperty -Path "IIS:\Sites\$projectName" -Name applicationPool -Value $appPool
+          Write-Host "IIS Site '$projectName' updated successfully"
+        }
+        
+        Write-Host "=== STEP 5: Final Configuration ==="
+        
+        # Start the app pool
+        Write-Host "Starting App Pool '$appPool'..."
+        Start-WebAppPool -Name $appPool -ErrorAction SilentlyContinue
+        
+        # Verify app pool is running
+        $appPoolState = (Get-WebAppPoolState -Name $appPool).Value
+        if ($appPoolState -eq "Started") {
+          Write-Host "App Pool '$appPool' is running successfully"
+        } else {
+          Write-Warning "App Pool state is: $appPoolState"
+        }
+        
+        # Start the website if it's not running
+        $siteState = (Get-WebsiteState -Name $projectName).Value
+        if ($siteState -ne "Started") {
+          Start-Website -Name $projectName -ErrorAction SilentlyContinue
+          Write-Host "Started website '$projectName'"
+        }
+        
+        # Verify final deployment
+        $site = Get-Website -Name $projectName
+        if ($site) {
+          Write-Host "=== DEPLOYMENT SUCCESSFUL ==="
+          Write-Host "Site Name: $($site.Name)"
+          Write-Host "Physical Path: $($site.PhysicalPath)"
+          Write-Host "Application Pool: $($site.ApplicationPool)"
+          Write-Host "State: $((Get-WebsiteState -Name $projectName).Value)"
+          
+          # Display bindings
+          Write-Host "Site Bindings:"
+          $site.bindings.Collection | ForEach-Object {
+            Write-Host "  Protocol: $($_.protocol), Binding: $($_.bindingInformation)"
+          }
+        } else {
+          Write-Warning "Site verification failed."
+        }
+        
+        Write-Host "=== DEPLOYMENT COMPLETED SUCCESSFULLY ==="
+        
+      } catch {
+        Write-Error "Deployment failed with error: $_"
+        Write-Error $_.ScriptStackTrace
+        exit 1
       }
-
-      if (-not (Test-Path $deployPath)) {
-        New-Item -ItemType Directory -Path $deployPath -Force | Out-Null
-      } else {
-        Get-ChildItem -Path $deployPath -Recurse | Remove-Item -Force -Recurse
-      }
-
-      Expand-Archive -Path $zipPath -DestinationPath $deployPath -Force
-
-      if (-not (Test-Path "IIS:\AppPools\$appPool")) {
-        New-WebAppPool -Name $appPool
-        Set-ItemProperty -Path "IIS:\AppPools\$appPool" -Name managedRuntimeVersion -Value ""
-      }
-
-      $appExists = Get-WebApplication -Name $appName -Site $parentSite -ErrorAction SilentlyContinue
-      if ($appExists) {
-        Set-ItemProperty -Path "IIS:\Sites\$parentSite$appPath" -Name physicalPath -Value $deployPath
-        Set-ItemProperty -Path "IIS:\Sites\$parentSite$appPath" -Name applicationPool -Value $appPool
-      } else {
-        New-WebApplication -Name $appName -Site $parentSite -PhysicalPath $deployPath -ApplicationPool $appPool -Force
-      }
-
-      Start-WebAppPool -Name $appPool
-
-      Write-Host "Application deployed successfully under path: $appPath"
-      Write-Host "Full URL: http://<server-name>:8111$appPath"
     pwsh: false
     errorActionPreference: 'stop'
 
